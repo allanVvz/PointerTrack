@@ -1,4 +1,4 @@
-from data.database import get_connection
+from src.database import get_connection
 from data.insert_local import insert_analysis
 import math
 import time

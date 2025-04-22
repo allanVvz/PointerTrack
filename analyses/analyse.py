@@ -3,7 +3,7 @@ import math
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from data.database import get_connection
+from src.database import get_connection
 from data.insert_local import insert_analysis
 
 
