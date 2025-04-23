@@ -2,8 +2,7 @@
 
 import asyncio
 from bleak import BleakScanner, BleakClient
-from insert_local import *
-from database import ensure_tables
+from insert_local import insert_local_from_json, close_inserter
 
 
 # UUIDs do HM‑10 (BLE) padrão para UART emblema: FFE0/FFE1
@@ -25,7 +24,6 @@ async def notification_handler(sender, data: bytearray):
             insert_local_from_json(line)
 
 async def run():
-    ensure_tables()
 
     print(f"Escaneando por '{DEVICE_NAME}' ({SCAN_TIMEOUT}s)…")
     devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
@@ -36,6 +34,7 @@ async def run():
 
     print(f"➜ Encontrado {target.name} [{target.address}]")
     async with BleakClient(target.address) as client:
+        
         # Bleak v0.20+: is_connected é propriedade
         if not client.is_connected:
             print("❌ Falha ao conectar.")
@@ -66,4 +65,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(run())
     except KeyboardInterrupt:
+        close_inserter()
         print("\n❎ Encerrado pelo usuário.")

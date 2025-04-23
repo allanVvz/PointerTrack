@@ -1,178 +1,160 @@
-# insert_local.py
-
 import json
 from datetime import datetime
-import psycopg2
+from database import *
 
-# ─── Variáveis de módulo ────────────────────────────────────────────────────
+class MouseMovementInserter:
+    def __init__(self, buffer_size: int = 10):
+        """
+        Inicializa o inserter: abre conexão e garante tabelas.
+        :param buffer_size: número de eventos antes de batch insert
+        """
+        self._conn = get_connection()
+        self._cur = self._conn.cursor() if self._conn else None
+        self._buffer = []
+        self._buffer_size = buffer_size
+        if self._cur:
+            self._ensure_tables()
 
-_conn = None
-_cur  = None
-_BUFFER = []
-_BUFFER_SIZE = 10
+    def _ensure_tables(self):
+        ddl = [
+            """
+            CREATE TABLE IF NOT EXISTS mouse_movements (
+                id        SERIAL PRIMARY KEY,
+                timestamp TIMESTAMP NOT NULL,
+                dx        INTEGER   NOT NULL,
+                dy        INTEGER   NOT NULL,
+                L         INTEGER   NOT NULL,
+                U         INTEGER   NOT NULL,
+                R         INTEGER   NOT NULL,
+                D         INTEGER   NOT NULL,
+                X         INTEGER   NOT NULL
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS mouse_clicks (
+                id        SERIAL      PRIMARY KEY,
+                timestamp TIMESTAMP   NOT NULL,
+                dx        INTEGER     NOT NULL,
+                dy        INTEGER     NOT NULL,
+                action    VARCHAR(10) NOT NULL
+            );
+            """
+        ]
+        for stmt in ddl:
+            self._cur.execute(stmt)
+        self._conn.commit()
 
-# ─── Conecta e prepara (chamado automáticamente) ──────────────────────────
+    def insert_from_json(self, json_payload: str):
+        """
+        Parseia JSON com chaves dx,dy,L,U,R,D,X,
+        adiciona ao buffer e faz batch de movimentos;
+        insere clique imediatamente.
+        """
+        if not self._cur:
+            return
 
-def _auto_init():
-    """
-    Se não houver conexão, abre uma e chama ensure_tables().
-    """
-    global _conn, _cur
-    if _conn is None:
-        # Ajuste user/password/database conforme seu ambiente
-        dsn = (
-            "dbname=postgres "
-            "user=postgres "
-            "password=1234 "
-            "host=localhost "
-            "port=5432 "
-            "options='-c client_encoding=UTF8'"
-        )
         try:
-            _conn = psycopg2.connect(dsn)
-            _cur  = _conn.cursor()
-            _ensure_tables()
-            print("✅ Conexão aberta e tabelas garantidas.")
+            data = json.loads(json_payload)
+        except json.JSONDecodeError:
+            print(f"❌ JSON inválido: {json_payload}")
+            return
+
+        ts = datetime.now()
+        try:
+            dx = int(data.get("dx", 0))
+            dy = int(data.get("dy", 0))
+            L  = int(data.get("L",  0))
+            U  = int(data.get("U",  0))
+            R  = int(data.get("R",  0))
+            D  = int(data.get("D",  0))
+            X  = int(data.get("X",  0))
+        except (ValueError, TypeError) as e:
+            print(f"❌ Falha ao converter tipos: {e}")
+            return
+
+        # Buffer de movimentos
+        self._buffer.append((ts, dx, dy, L, U, R, D, X))
+        print(f"📥 Buffer: {len(self._buffer)}/{self._buffer_size}")
+
+        if len(self._buffer) >= self._buffer_size:
+            self._flush_buffer()
+
+        # Clique X imediato
+        if X == 1:
+            try:
+                self._cur.execute(
+                    "INSERT INTO mouse_clicks (timestamp, dx, dy, action) VALUES (%s, %s, %s, %s)",
+                    (ts, dx, dy, 'press')
+                )
+                self._conn.commit()
+            except Exception as e:
+                print(f"❌ Erro no insert_click: {e}")
+
+    def _flush_buffer(self):
+        if not self._buffer:
+            return
+        sql = ("INSERT INTO mouse_movements "
+               "(timestamp, dx, dy, L, U, R, D, X) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)")
+        try:
+            self._cur.executemany(sql, self._buffer)
+            self._conn.commit()
+            print(f"✅ Batch insert de {len(self._buffer)} movimentos")
         except Exception as e:
-            print(f"❌ Falha ao inicializar inserter: {e}")
-            _conn = None
-            _cur  = None
+            print(f"❌ Erro no batch insert: {e}")
+        finally:
+            self._buffer.clear()
 
-# ─── Criação de tabelas (CREATE IF NOT EXISTS) ─────────────────────────────
+    def close(self):
+        if self._cur:
+            self._flush_buffer()
+            try:
+                self._cur.close()
+                self._conn.close()
+            except:
+                pass
 
-def _ensure_tables():
-    ddl = [
-        """
-        CREATE TABLE IF NOT EXISTS mouse_movements (
-            id        SERIAL PRIMARY KEY,
-            timestamp TIMESTAMP NOT NULL,
-            dx        INTEGER   NOT NULL,
-            dy        INTEGER   NOT NULL,
-            L         INTEGER   NOT NULL,
-            U         INTEGER   NOT NULL,
-            R         INTEGER   NOT NULL,
-            D         INTEGER   NOT NULL,
-            X         INTEGER   NOT NULL
-        );
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS mouse_clicks (
-            id        SERIAL      PRIMARY KEY,
-            timestamp TIMESTAMP   NOT NULL,
-            dx        INTEGER     NOT NULL,
-            dy        INTEGER     NOT NULL,
-            action    VARCHAR(10) NOT NULL
-        );
-        """
-    ]
-    for stmt in ddl:
-        _cur.execute(stmt)
-    _conn.commit()
+# Instância padrão e atalhos
+inserter = MouseMovementInserter()
+insert_local_from_json = inserter.insert_from_json
+close_inserter = inserter.close
 
-# ─── Inserção com buffer e batch de 10 ─────────────────────────────────────
-
-def insert_local_from_json(json_payload: str):
+def insert_analysis(movement_ts: datetime,
+                    vel_dir: float, vel_esq: float,
+                    vel_cima: float, vel_baixo: float,
+                    vel_euclid: float,
+                    acel_dir: float, acel_esq: float,
+                    acel_cima: float, acel_baixo: float,
+                    acel_euclid: float):
     """
-    Recebe JSON {"dx", "dy", "L","U","R","D","X"},
-    e faz batch insert a cada 10 itens.
+    Insere um registro na tabela mouse_analyse com os resultados de análise,
+    usando o timestamp do movimento como chave.
+    Só insere se movement_ts for maior que o último timestamp inserido.
+    Ignora registros sem deslocamento.
     """
-    global _BUFFER
-
-    # inicializa conexão+cursor se necessário
-    _auto_init()
-    if _conn is None or _cur is None:
+    # filtra movimentos sem deslocamento
+    if vel_dir == 0 and vel_esq == 0 and vel_cima == 0 and vel_baixo == 0 and vel_euclid == 0:
+        print(f"⏭ Análise ignorada para movimento em {movement_ts}: sem deslocamento.")
         return
 
-    # parse JSON
-    try:
-        data = json.loads(json_payload)
-    except json.JSONDecodeError:
-        print(f"❌ JSON inválido: {json_payload}")
+    conn = get_connection()
+    if conn is None:
         return
-
-    print("➜ Parsed dict:", data)
-    #print("   types: dx->", type(data.get("dx")), "dy->", type(data.get("dy")))
-    # ───────────────────────────────────────────────────────────────────────────
-
-    ts = datetime.now()
-
-    # extração sem erro de chave
-    dx = data.get("dx", 0)
-    dy = data.get("dy", 0)
-    L  = data.get("L",  0)
-    U  = data.get("U",  0)
-    R  = data.get("R",  0)
-    D  = data.get("D",  0)
-    X  = data.get("X",  0)
-
-    # se vierem strings, converta depois do debug
+    cur = conn.cursor()
     try:
-        dx = int(dx)
-        dy = int(dy)
-        L  = int(L)
-        U  = int(U)
-        R  = int(R)
-        D  = int(D)
-        X  = int(X)
+        query = (
+            "INSERT INTO mouse_analyse (movement_ts, vel_direita, vel_esquerda, vel_cima, vel_baixo, "
+            "vel_euclidiana, acel_direita, acel_esquerda, acel_cima, acel_baixo, acel_euclidiana) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        )
+        cur.execute(query, (
+            movement_ts,
+            vel_dir, vel_esq, vel_cima, vel_baixo, vel_euclid,
+            acel_dir, acel_esq, acel_cima, acel_baixo, acel_euclid
+        ))
+        conn.commit()
+        print(f"✔ Análise inserida para movimento em {movement_ts}")
     except Exception as e:
-        print(f"❌ Falha ao converter tipos: {e}")
-        return
-
-    # adiciona ao buffer
-    _BUFFER.append((ts, dx, dy, L, U, R, D, X))
-    print(f"📥 Buffer: {len(_BUFFER)}/{_BUFFER_SIZE}")
-
-    # batch insert de movimentos
-    if len(_BUFFER) >= _BUFFER_SIZE:
-        _flush_buffer()
-
-    # insere clique imediatamente
-    #if X == 1:
-    #    try:
-    #        _cur.execute(
-    #            "INSERT INTO mouse_clicks (timestamp, dx, dy, action) VALUES (%s,%s,%s,%s)",
-    #            (ts, dx, dy, "press")
-    #        )
-    #        _conn.commit()
-    #    except Exception as e:
-    #        print(f"❌ Erro no insert_click: {e}")
-
-def _flush_buffer():
-    global _BUFFER
-    if not _BUFFER:
-        return
-    sql = """
-        INSERT INTO mouse_movements (timestamp, dx, dy, L, U, R, D, X)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-    """
-    try:
-        _cur.executemany(sql, _BUFFER)
-        _conn.commit()
-        print(f"✅ Batch insert de {len(_BUFFER)} movimentos")
-    except Exception as e:
-        print(f"❌ Erro no batch insert: {e}")
+        print(f"❌ Erro ao inserir análise: {e}")
     finally:
-        _BUFFER = []
-
-# ─── Limpa tudo ao finalizar ────────────────────────────────────────────────
-
-def close_inserter():
-    """
-    Garante que o buffer restante seja enviado e fecha conexão.
-    """
-    if _conn is None or _cur is None:
-        return
-    try:
-        _flush_buffer()
-    finally:
-        try: _cur.close()
-        except: pass
-        try: _conn.close()
-        except: pass
-        print("🔒 Inserter encerrado.")
-
-# ─── Se executado diretamente, apenas garante tabelas ───────────────────────
-
-if __name__ == "__main__":
-    _auto_init()
-    close_inserter()
+        cur.close()
+        conn.close()
